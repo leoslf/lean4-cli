@@ -272,6 +272,10 @@ section Configuration
       | "" => none
       | s  => s.toInt?
 
+  instance : ParseableType System.FilePath where
+    name := "System.FilePath"
+    parse? s := some (s : System.FilePath)
+
   /-- A type synonym for `Name`, which will carry a `ParseableType ModuleName`
   instance, supporting parsing either a module name (e.g. `Mathlib.Topology.Basic`)
   or a relative path to a Lean file (e.g. `Mathlib/Topology/Basic.lean`). -/
