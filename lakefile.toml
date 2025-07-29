@@ -3,3 +3,6 @@ defaultTargets = ["Cli"]
 
 [[lean_lib]]
 name = "Cli"
+
+[[lean_exe]]
+name = "Cli.Example"

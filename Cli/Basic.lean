@@ -23,6 +23,38 @@ section Utils
 
     def flatMap (f : α → Array β) (xs : Array α) : Array β :=
       join (xs.map f)
+
+    /--
+    Appends those elements of `right` to `left` whose `key` is not already
+    contained in `left`.
+    -/
+    def leftUnionBy [Ord α] (key : β → α) (left : Array β) (right : Array β)
+      : Array β := Id.run do
+      let leftMap := left.map (fun v => (key v, v)) |>.toList |> Lean.RBMap.ofList (cmp := compare)
+      let mut result := left
+      for v in right do
+        if ¬ leftMap.contains (key v) then
+          result := result.push v
+      return result
+
+    /--
+    Prepends those elements of `left` to `right` whose `key` is not already
+    contained in `right`.
+    -/
+    def rightUnionBy [Ord α] (key : β → α) (left : Array β) (right : Array β)
+      : Array β := Id.run do
+      let rightMap := right.map (fun v => (key v, v)) |>.toList |> Lean.RBMap.ofList (cmp := compare)
+      let mut result := right
+      for v in left.reverse do
+        if ¬ rightMap.contains (key v) then
+          result := #[v] ++ result
+      return result
+
+    /-- Deletes all elements from `left` whose `key` is in `right`. -/
+    def diffBy [Ord α] (key : β → α) (left : Array β) (right : Array α)
+      : Array β :=
+      let rightMap := Lean.RBTree.ofList (cmp := compare) right.toList
+      left.filter fun v => ¬ (rightMap.contains <| key v)
   end Array
 
   namespace String
@@ -129,6 +161,9 @@ section Utils
     -/
     def optJoin (xs : Array String) (sep : String) : String :=
       xs.filter (· ≠ "") |>.toList |> sep.intercalate
+
+    def splitAt (n : Nat) (s : String) : String × String :=
+      (s.take n, s.drop n)
   end String
 
   namespace Array
@@ -189,6 +224,11 @@ section Utils
     def optStr [ToString α] : Option α → String
       | none   => ""
       | some v => toString v
+
+    open Lean in
+    def elimMQuoted (r : Type := String) [Quote r] [Monad m] {a} (f : a → m Term) : Option a → m Term
+      | .none => pure $ Quote.quote (.none : Option r)
+      | .some x => f x
   end Option
 end Utils
 
@@ -305,6 +345,8 @@ section Configuration
     longName    : String
     /-- Description that is displayed in the help. -/
     description : String
+    /-- Environment variable name -/
+    envVar?     : Option String := none
     /--
     Type according to which the parameter is validated.
     `Unit` is used to designate flags without a parameter.
@@ -324,10 +366,12 @@ section Configuration
       (shortName?  : Option String := none)
       (longName    : String)
       (description : String)
+      (envVar?     : Option String := none)
       : Flag := {
         shortName?  := shortName?
         longName    := longName
         description := description
+        envVar?     := envVar?
         type        := Unit
       }
 
@@ -354,15 +398,24 @@ section Configuration
     deriving Inhabited, BEq, Repr
 
   namespace Parsed
+    inductive Flag.Source where
+      | default : Flag.Source
+      | envVar : Flag.Source
+      | short : Flag.Source
+      | long : Flag.Source
+      deriving Inhabited, BEq, Ord, Repr
+
     /--
     Represents a flag and its parsed value.
     Use `Parsed.Flag.as!` to convert the value to some `ParseableType`.
     -/
     structure Flag where
       /-- Associated flag meta-data. -/
-      flag  : Cli.Flag
+      flag   : Cli.Flag
       /-- Parsed value that was validated and conforms to `flag.type`. -/
-      value : String
+      value  : String
+      /-- Flag source -/
+      source : Flag.Source
       deriving Inhabited, BEq, Repr
 
     instance : ToString Flag where
@@ -832,7 +885,7 @@ section Configuration
     If postprocessing mutates the subcommand structure in `Parsed.cmd`, care must be taken to update
     `Parsed.parent?` accordingly as well.
     -/
-    postprocess : ExtendableCmd → Parsed → Except String Parsed := fun _ => pure
+    postprocess : ExtendableCmd → Parsed → EIO String Parsed := fun _ => pure
     deriving Inhabited
 
   /--
@@ -1014,7 +1067,7 @@ section Macro
 
   syntax variableArg := colGe "..." literalIdent " : " term "; " term
 
-  syntax flag := colGe literalIdent ("," literalIdent)? (" : " term)? "; " term
+  syntax flag := colGe literalIdent ("," literalIdent)? (" | " literalIdent)? (" : " term)? "; " term
 
   syntax "`[Cli|\n"
       literalIdent runFun "; " ("[" term "]")?
@@ -1051,19 +1104,23 @@ section Macro
     `(Arg.mk $(expandIdentLiterally name) $description $type)
 
   def expandFlag (flag : TSyntax `Cli.flag) : MacroM Term := do
-    let `(Cli.flag| $flagName1:term $[, $flagName2:term]? $[ : $type]?; $description) := flag
+    let `(Cli.flag| $flagName1:term $[, $flagName2:term]? $[ | $envVar:term]? $[ : $type]?; $description) := flag
       | Macro.throwUnsupported
     let mut shortName := quote (none : Option String)
     let mut longName := flagName1
     if let some flagName2 := flagName2 then
       shortName ← `(some $(expandIdentLiterally flagName1))
       longName := flagName2
+    let envVar? ← do
+      match envVar with
+      | .none => pure $ quote (none : Option String)
+      | .some envVar => `(some $(expandIdentLiterally envVar))
     let unitType : Term ← `(Unit)
     let type :=
       match type with
       | none => unitType
       | some type => type
-    `(Flag.mk $shortName $(expandIdentLiterally longName) $description $type)
+    `(Flag.mk $shortName $(expandIdentLiterally longName) $description $envVar? $type)
 
   macro_rules
     | `(`[Cli|
@@ -1394,7 +1451,7 @@ section Parsing
     private partial def readMultiFlag? : ParseM (Option (Array Parsed.Flag)) := do
       let some (flagContent, true) ← readFlagContent?
         | return none
-      let some (parsedFlags : Array (String × Parsed.Flag)) ← loop flagContent Lean.RBTree.empty
+      let some (parsedFlags : Array (String × Parsed.Flag)) ← loop flagContent (matched := Lean.RBTree.empty)
         | return none
       for (inputFlagName, parsedFlag) in parsedFlags do
         ensureFlagUnique parsedFlag.flag ⟨inputFlagName, true⟩
@@ -1408,6 +1465,7 @@ section Parsing
         -- astronomical amount of short flags.
         if flagContent = "" then
           return some #[]
+
         let parsedFlagsCandidates : Array (Array (String × Parsed.Flag)) ←
           (← cmd).meta.flags.filter (·.isParamless)
             |>.filter               (·.hasShortName)
@@ -1415,12 +1473,10 @@ section Parsing
             |>.filter               (¬ matched.contains ·.shortName!)
             |>.qsort                (·.shortName!.length > ·.shortName!.length)
             |>.filterMapM fun flag => do
-              let inputFlagName := flagContent.take flag.shortName!.length
-              let restContent   := flagContent.drop flag.shortName!.length
-              let newMatched    := matched.insert flag.shortName!
-              let some tail ← loop restContent newMatched
+              let (inputFlagName, restContent) := String.splitAt flag.shortName!.length flagContent
+              let some tail ← loop restContent $ matched.insert flag.shortName!
                 | return none
-              return some <| #[(inputFlagName, ⟨flag, ""⟩)] ++ tail
+              return some <| #[(inputFlagName, ⟨flag, "", .short⟩)] ++ tail
         return parsedFlagsCandidates[0]?
 
     private def readEqFlag? : ParseM (Option Parsed.Flag) := do
@@ -1439,7 +1495,7 @@ section Parsing
         ensureFlagUnique flag inputFlag
         ensureFlagWellTyped flag inputFlag flagValue
         skip
-        return some ⟨flag, flagValue⟩
+        return some ⟨flag, flagValue, if isShort then .short else .long⟩
 
     private def readWsFlag? : ParseM (Option Parsed.Flag) := do
       let some (flagName, isShort) ← readFlagContent?
@@ -1454,7 +1510,7 @@ section Parsing
       ensureFlagUnique flag inputFlag
       ensureFlagWellTyped flag inputFlag flagValue
       skip; skip
-      return some ⟨flag, flagValue⟩
+      return some ⟨flag, flagValue, if isShort then .short else .long⟩
 
     private def readPrefixFlag? : ParseM (Option Parsed.Flag) := do
       let some (flagContent, true) ← readFlagContent?
@@ -1472,7 +1528,7 @@ section Parsing
       ensureFlagUnique flag inputFlag
       ensureFlagWellTyped flag inputFlag flagValue
       skip
-      return some ⟨flag, flagValue⟩
+      return some ⟨flag, flagValue, .short⟩
 
     private def readParamlessFlag? : ParseM (Option Parsed.Flag) := do
       let some (flagName, isShort) ← readFlagContent?
@@ -1484,7 +1540,7 @@ section Parsing
         throw <| ← parseError <| missingFlagArg flag inputFlag
       ensureFlagUnique flag inputFlag
       skip
-      return some ⟨flag, ""⟩
+      return some ⟨flag, "", if isShort then .short else .long⟩
 
     private def parseFlag : ParseM Bool := do
       if let some parsedFlags ← readMultiFlag? then
@@ -1584,14 +1640,14 @@ section Parsing
     Returns either the (sub)command that an error occured in and the corresponding error message or
     the (sub)command that was called and the parsed input after postprocessing.
     -/
-    def process (c : Cmd) (args : List String) : Except (Cmd × String) (Cmd × Parsed) := do
+    def process (c : Cmd) (args : List String) : EIO (Cmd × String) (Cmd × Parsed) := do
       let c := c.applyExtensions
       let result := c.parse args
       match result with
       | .ok (cmd, parsed) =>
         let some ext := cmd.extension?
           | return (cmd, parsed)
-        match ext.postprocess (.ofFullCmd cmd) parsed with
+        match ← ext.postprocess (.ofFullCmd cmd) parsed |>.toBaseIO with
         | .ok newParsed =>
           return (cmd, newParsed)
         | .error msg =>
@@ -1613,8 +1669,7 @@ section IO
     In the case of a processing error, the error is printed to stderr and an exit code of `1` is returned.
     -/
     def validate (c : Cmd) (args : List String) : IO UInt32 := do
-      let result := c.process args
-      match result with
+      match ← c.process args |>.toBaseIO with
       | .ok (cmd, parsed) =>
         if parsed.hasFlag "help" then
           parsed.printHelp

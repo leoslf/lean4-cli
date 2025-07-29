@@ -2,42 +2,6 @@ import Cli.Basic
 
 namespace Cli
 
-section Utils
-  namespace Array
-    /--
-    Appends those elements of `right` to `left` whose `key` is not already
-    contained in `left`.
-    -/
-    def leftUnionBy [Ord α] (key : β → α) (left : Array β) (right : Array β)
-      : Array β := Id.run do
-      let leftMap := left.map (fun v => (key v, v)) |>.toList |> Lean.RBMap.ofList (cmp := compare)
-      let mut result := left
-      for v in right do
-        if ¬ leftMap.contains (key v) then
-          result := result.push v
-      return result
-
-    /--
-    Prepends those elements of `left` to `right` whose `key` is not already
-    contained in `right`.
-    -/
-    def rightUnionBy [Ord α] (key : β → α) (left : Array β) (right : Array β)
-      : Array β := Id.run do
-      let rightMap := right.map (fun v => (key v, v)) |>.toList |> Lean.RBMap.ofList (cmp := compare)
-      let mut result := right
-      for v in left.reverse do
-        if ¬ rightMap.contains (key v) then
-          result := #[v] ++ result
-      return result
-
-    /-- Deletes all elements from `left` whose `key` is in `right`. -/
-    def diffBy [Ord α] (key : β → α) (left : Array β) (right : Array α)
-      : Array β :=
-      let rightMap := Lean.RBTree.ofList (cmp := compare) right.toList
-      left.filter fun v => ¬ (rightMap.contains <| key v)
-  end Array
-end Utils
-
 section Extensions
   /-- Prepends an author name to the description of the command. -/
   def author (author : String) : Extension := {
@@ -99,7 +63,7 @@ section Extensions
   -/
   def defaultValues! (defaults : Array (String × String)) : Extension :=
     let findDefaultFlags cmd := defaults.map <| fun (longName, defaultValue) =>
-      ⟨cmd.flag! longName, defaultValue⟩
+      ⟨cmd.flag! longName, defaultValue, .default⟩
     {
       extend := fun cmd =>
         let defaultFlags := findDefaultFlags cmd
@@ -138,6 +102,25 @@ section Extensions
         if let some missingFlag ← pure <| missingFlags[0]? then
           throw s!"Missing required flag `--{missingFlag.longName}`."
         return parsed
+    }
+
+  def envVars : Extension :=
+    {
+      extend := λcmd =>
+        let flags' := cmd.flags |>.map λflag =>
+          match flag.envVar? with
+          | .none => flag
+          | .some envVar =>
+            { flag with description := flag.description ++ s!" [env: {envVar}]" }
+        cmd.update (flags := flags')
+      postprocess := λcmd parsed => do
+        let flags' : Array Parsed.Flag ← cmd.flags.filterMapM λflag => do
+          let some envVar := flag.envVar?
+            | return none
+          let some value ← IO.getEnv envVar
+            | return none
+          return some ⟨flag, value, .envVar⟩
+        return { parsed with flags := Array.leftUnionBy (·.flag.longName) parsed.flags flags' }
     }
 end Extensions
 

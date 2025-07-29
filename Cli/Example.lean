@@ -3,10 +3,10 @@ import Cli
 open Cli
 
 def runExampleCmd (p : Parsed) : IO UInt32 := do
-  let input   : String       := p.positionalArg! "input" |>.as! String
-  let outputs : Array String := p.variableArgsAs! String
-  IO.println <| "Input: " ++ input
-  IO.println <| "Outputs: " ++ toString outputs
+  -- let input   : String       := p.positionalArg! "input" |>.as! String
+  -- let outputs : Array String := p.variableArgsAs! String
+  -- IO.println <| "Input: " ++ input
+  -- IO.println <| "Outputs: " ++ toString outputs
 
   if p.hasFlag "verbose" then
     IO.println "Flag `--verbose` was set."
@@ -22,8 +22,12 @@ def runExampleCmd (p : Parsed) : IO UInt32 := do
     let moduleName : ModuleName := p.flag! "module" |>.as! ModuleName
     IO.println <| s!"Flag `--module` was set to `{moduleName}`."
 
-  if let some setPathsFlag := p.flag? "set-paths" then
-    IO.println <| toString <| setPathsFlag.as! (Array String)
+  -- if let some setPathsFlag := p.flag? "set-paths" then
+  --   IO.println <| toString <| setPathsFlag.as! (Array String)
+
+  if let some level := p.flag? "log-level" then
+    IO.println <| toString <| level.as! String
+
   return 0
 
 def installCmd := `[Cli|
@@ -53,12 +57,13 @@ def exampleCmd : Cmd := `[Cli|
     "set-paths" : Array String; "Declares a flag `--set-paths` " ++
                                 "that takes an argument of type `Array Nat`. " ++
                                 "Quotation marks allow the use of hyphens."
+    "log-level" | LOG_LEVEL;    "Sets the log level by either --log-level or via envvar LOG_LEVEL"
 
   ARGS:
-    input : String;      "Declares a positional argument <input> " ++
-                         "that takes an argument of type `String`."
-    ...outputs : String; "Declares a variable argument <output>... " ++
-                         "that takes an arbitrary amount of arguments of type `String`."
+    -- input : String;      "Declares a positional argument <input> " ++
+    --                      "that takes an argument of type `String`."
+    -- ...outputs : String; "Declares a variable argument <output>... " ++
+    --                      "that takes an arbitrary amount of arguments of type `String`."
 
   SUBCOMMANDS:
     installCmd;
@@ -121,7 +126,7 @@ Yields:
       -h, --help                  Prints this message.
       --version                   Prints the version.
       --verbose                   Declares a flag `--verbose`. This is the
-                                  description of the flag.
+                                  description of the flag. [env var: EXAMPLE_VERBOSE]
       -i, --invert                Declares a flag `--invert` with an associated
                                   short alias `-i`.
       -o, --optimize              Declares a flag `--optimize` with an associated
